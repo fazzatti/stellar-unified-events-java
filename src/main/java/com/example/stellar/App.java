@@ -16,6 +16,36 @@ import org.stellar.sdk.xdr.OperationMetaV2;
 import org.stellar.sdk.xdr.SCVal;
 import org.stellar.sdk.xdr.TransactionMeta;
 
+/**
+ * Stellar Unified Asset Events Monitor Example
+ * 
+ * Monitors unified asset events (mint, burn, clawback) for a specific Stellar asset
+ * using the Horizon API streaming functionality and V4 transaction metadata.
+ * 
+ * CONFIGURATION:
+ * Before running, update the following constants:
+ * - HORIZON_URL: Your Horizon server endpoint (must support transaction meta XDR)
+ * - NETWORK: The Stellar network (TESTNET, FUTURENET, etc.)
+ * - ASSET_CODE: The asset code to monitor (e.g., "USDC", "EURC")
+ * - ASSET_ISSUER: The asset issuer's public key
+ * 
+ * USAGE:
+ * 1. Start from latest ledger (real-time monitoring):
+ *    mvn exec:java
+ * 
+ * 2. Start from specific ledger (historical + real-time):
+ *    mvn exec:java -Dexec.args="593231"
+ * 
+ * REQUIREMENTS:
+ * - Horizon server with transaction meta XDR enabled
+ * - For local testing, use the Stellar CLI: `stellar container start testnet`
+ * 
+ * NOTES:
+ * - Uses Protocol 23+ V4 transaction metadata format
+ * - Includes rate limiting (200ms between ledgers) to prevent API overload
+ * - Automatically handles cursor-based streaming for reliable event processing
+ */
+
 
 
 public class App {
@@ -24,7 +54,6 @@ public class App {
     private static final String ASSET_CODE = "fifo";
     private static final String ASSET_ISSUER = "GC66GVXUBUONBFLHFA7QBB2RU7HK3XT5AYM5ZZSIIG2XCYDGHXRDKUKE";
     private static final Asset ASSET = Asset.create(ASSET_CODE + ":" + ASSET_ISSUER);
-    private static final long STARTING_LEDGER = 593231;
     
     private static final Server server = new Server(HORIZON_URL);
 
@@ -32,42 +61,36 @@ public class App {
         System.out.println("=== Monitoring Unified Asset Events ===");
         System.out.println("Asset: " + ASSET_CODE + " (" + ASSET_ISSUER + ")");
         
-        boolean useStreaming = args.length > 0 && "stream".equals(args[0]);
-        
-        if (useStreaming) {
-            System.out.println("Mode: Real-time streaming\n");
-            startStreamingMode();
-        } else {
-            System.out.println("Mode: Historical sync from ledger " + STARTING_LEDGER);
-            System.out.println("Use 'stream' argument for real-time mode\n");
-            startHistoricalMode();
-        }
-    }
-    
-    private static void startHistoricalMode() {
-        long ledgerSequence = STARTING_LEDGER;
-        
-        while (true) {
+        // Parse starting ledger from args, or use "now" cursor for latest
+        String cursor = "now";
+        if (args.length > 0) {
             try {
-                LedgerResponse ledger = server.ledgers().ledger(ledgerSequence);
-                if (ledger != null) {
-                    processLedger(ledger.getSequence());
-                    ledgerSequence = ledger.getSequence() + 1;
-                }
-
-                Thread.sleep(1000);
-                
+                long startingLedger = Long.parseLong(args[0]);
+                cursor = getCursorForLedger(startingLedger);
+                System.out.println("Starting from ledger: " + startingLedger);
+            } catch (NumberFormatException e) {
+                System.out.println("Invalid ledger number, starting from latest");
             } catch (Exception e) {
-                try {
-                    Thread.sleep(1000);
-                } catch (InterruptedException ie) {
-                    break;
-                }
+                System.out.println("Error getting cursor for ledger, starting from latest: " + e.getMessage());
             }
+        } else {
+            System.out.println("Starting from latest ledger");
+        }
+    
+        startStreaming(cursor);
+    }
+    
+    private static String getCursorForLedger(long ledgerSequence) throws Exception {
+        try {
+            LedgerResponse ledger = server.ledgers().ledger(ledgerSequence);
+            System.out.println("Found ledger " + ledgerSequence + " with paging token: " + ledger.getPagingToken());
+            return ledger.getPagingToken();
+        } catch (Exception e) {
+            throw new Exception("Failed to get cursor for ledger " + ledgerSequence + ": " + e.getMessage());
         }
     }
     
-    private static void startStreamingMode() {
+    private static void startStreaming(String cursor) {
         try {
             EventListener<LedgerResponse> ledgerListener = new EventListener<LedgerResponse>() {
                 @Override
@@ -82,7 +105,10 @@ public class App {
                 }
             };
             
-            server.ledgers().cursor("now").stream(ledgerListener);
+            server.ledgers()
+                    .cursor(cursor)
+                    .stream(ledgerListener);
+                    
         } catch (Exception e) {
             System.err.println("Streaming error: " + e.getMessage());
         }
@@ -99,8 +125,23 @@ public class App {
             for (TransactionResponse tx : transactions.getRecords()) {
                 parseResultMetaXdr(tx.getResultMetaXdr());
             }
+
+            // Add delay between ledger processing to prevent hitting the rate limit of the API
+            try {
+                Thread.sleep(200); 
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            
         } catch (Exception e) {
             System.err.println("Error processing ledger: " + e.getMessage());
+            
+            try {
+                Thread.sleep(1000); // On errors, wait longer before the next attempt
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
     
@@ -108,6 +149,9 @@ public class App {
         try {
             TransactionMeta txMeta = TransactionMeta.fromXdrBase64(resultMetaXdr);
 
+            // Check for V4 transaction metadata (Protocol 23+)
+            // V4 metadata is required for unified asset events
+            // Earlier protocols use different versions (V0, V1, V2, V3)
             if (txMeta.getDiscriminant() == 4 && txMeta.getV4() != null) {
                 for (OperationMetaV2 op : txMeta.getV4().getOperations()) {
                     parseOperation(op);
@@ -158,49 +202,90 @@ public class App {
         System.out.println("---");
     }
     
-    private static String parseSCVal(SCVal scval) {
+    /**
+     * Convert SCVal to native Java type, similar to JS SDK's scValToNative()
+     * Attempts to convert smart contract values to readable native representations:
+     * - void -> null
+     * - u32, i32 -> Integer/Long
+     * - u64, i64, u128, i128 -> Long/BigInteger  
+     * - bool -> Boolean
+     * - bytes -> byte array
+     * - symbol -> String
+     * - string -> String
+     * - address -> formatted address string
+     * If no conversion is available, returns the XDR value as string
+     */
+    private static Object scValToNative(SCVal scval) {
         switch (scval.getDiscriminant()) {
-            case SCV_SYMBOL:
-                return "Symbol: " + scval.getSym().getSCSymbol();
-                
-            case SCV_STRING:
-                return "String: " + scval.getStr().getSCString();
-                
-            case SCV_ADDRESS:
-                return "Address: " + parseAddress(scval.getAddress());
-                
-            case SCV_I128:
-                // Convert I128 to readable number
-                long hi = scval.getI128().getHi().getInt64();
-                long lo = scval.getI128().getLo().getUint64().getNumber().longValue();
-                return "I128: " + ((hi << 64) | (lo & 0xFFFFFFFFFFFFFFFFL));
-                
-            case SCV_U128:
-                // Convert U128 to readable number
-                long uHi = scval.getU128().getHi().getUint64().getNumber().longValue();
-                long uLo = scval.getU128().getLo().getUint64().getNumber().longValue();
-                return "U128: " + ((uHi << 64) | (uLo & 0xFFFFFFFFFFFFFFFFL));
-                
-            case SCV_I64:
-                return "I64: " + scval.getI64().getInt64();
-                
-            case SCV_U64:
-                return "U64: " + scval.getU64().getUint64().getNumber();
-                
-            case SCV_I32:
-                return "I32: " + scval.getI32().getInt32();
-                
-            case SCV_U32:
-                return "U32: " + scval.getU32().getUint32().getNumber();
+            case SCV_VOID:
+                return null;
                 
             case SCV_BOOL:
-                return "Bool: " + scval.getB();
+                return scval.getB();
+                
+            case SCV_U32:
+                return scval.getU32().getUint32().getNumber().intValue();
+                
+            case SCV_I32:
+                return scval.getI32().getInt32();
+                
+            case SCV_U64:
+                return scval.getU64().getUint64().getNumber().longValue();
+                
+            case SCV_I64:
+                return scval.getI64().getInt64();
+                
+            case SCV_U128:
+                // For display purposes, convert to long if possible, otherwise use string
+                long uHi = scval.getU128().getHi().getUint64().getNumber().longValue();
+                long uLo = scval.getU128().getLo().getUint64().getNumber().longValue();
+                if (uHi == 0) {
+                    return uLo;
+                }
+                return "U128: " + ((uHi << 64) | (uLo & 0xFFFFFFFFFFFFFFFFL));
+                
+            case SCV_I128:
+                // For display purposes, convert to long if possible, otherwise use string
+                long hi = scval.getI128().getHi().getInt64();
+                long lo = scval.getI128().getLo().getUint64().getNumber().longValue();
+                if (hi == 0 || hi == -1) {
+                    return ((hi << 64) | (lo & 0xFFFFFFFFFFFFFFFFL));
+                }
+                return "I128: " + ((hi << 64) | (lo & 0xFFFFFFFFFFFFFFFFL));
+                
+            case SCV_SYMBOL:
+                return scval.getSym().getSCSymbol();
+                
+            case SCV_STRING:
+                return scval.getStr().getSCString();
                 
             case SCV_BYTES:
-                return "Bytes: " + Arrays.toString(scval.getBytes().getSCBytes());
+                return scval.getBytes().getSCBytes();
+                
+            case SCV_ADDRESS:
+                return parseAddress(scval.getAddress());
                 
             default:
-                return "Unknown type: " + scval.getDiscriminant() + " -> " + scval.toString();
+                // Return XDR string representation for unknown types
+                return scval.toString();
+        }
+    }
+    
+    /**
+     * Format SCVal for display, wrapping the native value with type information
+     */
+    private static String parseSCVal(SCVal scval) {
+        Object nativeValue = scValToNative(scval);
+        String typeName = scval.getDiscriminant().toString().replace("SCV_", "").toLowerCase();
+        
+        if (nativeValue == null) {
+            return "void: null";
+        } else if (nativeValue instanceof byte[]) {
+            return typeName + ": " + Arrays.toString((byte[]) nativeValue);
+        } else if (nativeValue instanceof String && scval.getDiscriminant() == org.stellar.sdk.xdr.SCValType.SCV_ADDRESS) {
+            return (String) nativeValue; // Address is already formatted
+        } else {
+            return typeName + ": " + nativeValue;
         }
     }
     
