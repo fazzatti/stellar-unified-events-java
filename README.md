@@ -2,9 +2,16 @@
 
 Monitors unified asset events (mint, burn, clawback) for a specific asset on Stellar testnet.
 
+## Requirements
+
+Make sure you are using a horizon instance with the transaction result meta XDR enabled for ingestion and also emitting native asset events. For this, enable the following flags for the captive core:
+
+- `EMIT_CLASSIC_EVENTS=true`
+- `BACKFILL_STELLAR_ASSET_EVENTS=true`
+
 ## Configuration
 
-Adjust the snippet code to define:
+Adjust the `Config` file with the asset and horizon parameters:
 
 - **ASSET_CODE**: `fifo`
 - **ASSET_ISSUER**: `GC66GVXUBUONBFLHFA7QBB2RU7HK3XT5AYM5ZZSIIG2XCYDGHXRDKUKE`
@@ -19,13 +26,6 @@ mvn clean install
 
 ## Usage
 
-Make sure you are using a horizon instance with the transaction result meta XDR enabled for ingestion.
-To run a local container for testnet use the Stellar CLI:
-
-```bash
-stellar container start testnet
-```
-
 **Start from Latest Ledger** (monitors new events in real-time):
 
 ```bash
@@ -35,7 +35,7 @@ mvn exec:java
 **Start from Specific Ledger** (processes from a specific ledger number, then continues with real-time):
 
 ```bash
-mvn exec:java -Dexec.args="604790"
+mvn exec:java -Dexec.args="624246"
 ```
 
-Replace `604790` with your desired starting ledger number.
+Replace `624246` with your desired starting ledger number.
