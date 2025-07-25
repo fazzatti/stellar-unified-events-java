@@ -28,13 +28,39 @@ public class EventProcessor {
         }
         
         // Parse data
+        // When muxed addresses are involved, the data can be a map structure
+        // This handles both simple value and map format (for muxed addresses)
         SCVal rawData = eventBody.getData();
-        String data = SCValParser.formatSCVal(rawData);
+        String data = extractAmountFromData(rawData);
         
         // Check if this is our asset's event
         String expectedAssetIdentifier = Config.ASSET_CODE + ":" + Config.ASSET_ISSUER;
         if (topics.length > 2 && topics[2].equals(expectedAssetIdentifier)) {
             processAssetEvent(topics[0], data);
+        }
+    }
+    
+    /**
+     * Extract amount from event data, handling both simple values and map structures
+     * @param rawData The raw SCVal data
+     * @return String representation of the amount
+     * 
+     */
+    private String extractAmountFromData(SCVal rawData) {
+        // Check if data is a map (muxed address case)
+        if (rawData.getDiscriminant() == org.stellar.sdk.xdr.SCValType.SCV_MAP && rawData.getMap() != null) {
+            // Look for "amount" key in the map
+            for (org.stellar.sdk.xdr.SCMapEntry entry : rawData.getMap().getSCMap()) {
+                Object keyValue = SCValParser.scValToNative(entry.getKey());
+                if ("amount".equals(keyValue.toString())) {
+                    return SCValParser.scValToNative(entry.getVal()).toString();
+                }
+            }
+            // If no "amount" key found, fallback to formatted representation
+            return SCValParser.formatSCVal(rawData);
+        } else {
+            // Simple value case (original format)
+            return SCValParser.formatSCVal(rawData);
         }
     }
     
