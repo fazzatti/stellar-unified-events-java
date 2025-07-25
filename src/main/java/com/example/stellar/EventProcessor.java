@@ -6,7 +6,8 @@ import org.stellar.sdk.StrKey;
 import org.stellar.sdk.xdr.ContractEvent;
 import org.stellar.sdk.xdr.ContractEvent.ContractEventBody.ContractEventV0;
 import org.stellar.sdk.xdr.SCVal;
-
+import org.stellar.sdk.xdr.SCValType;
+import org.stellar.sdk.xdr.SCMapEntry;
 /**
  * Handles parsing and processing of Stellar asset events
  */
@@ -48,9 +49,9 @@ public class EventProcessor {
      */
     private String extractAmountFromData(SCVal rawData) {
         // Check if data is a map (muxed address case)
-        if (rawData.getDiscriminant() == org.stellar.sdk.xdr.SCValType.SCV_MAP && rawData.getMap() != null) {
+        if (rawData.getDiscriminant() == SCValType.SCV_MAP && rawData.getMap() != null) {
             // Look for "amount" key in the map
-            for (org.stellar.sdk.xdr.SCMapEntry entry : rawData.getMap().getSCMap()) {
+            for (SCMapEntry entry : rawData.getMap().getSCMap()) {
                 Object keyValue = SCValParser.scValToNative(entry.getKey());
                 if ("amount".equals(keyValue.toString())) {
                     return SCValParser.scValToNative(entry.getVal()).toString();
